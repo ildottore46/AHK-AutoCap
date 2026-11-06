@@ -52,6 +52,25 @@ GroupAdd("AutoCapExclude", "ahk_exe Code.exe")
 ; Must stay below AUTOCAP_MIN_INPUT_LEVEL so the script never reads its own output.
 global AUTOCAP_SENDLEVEL := 0
 global AUTOCAP_MIN_INPUT_LEVEL := AUTOCAP_SENDLEVEL + 1
+
+; Companion programs: started by AutoCap AFTER its keyboard hook is installed.
+; Windows asks the newest hook first, so these programs see every keystroke
+; before AutoCap blocks a lowercase letter. One full path per line: an .exe,
+; or an .ahk script (started through its file association, so v1 scripts work).
+; Remove them from their own autostart (aText: its "start at login" option;
+; scripts: shell:startup), or they may start before AutoCap.
+global AUTOCAP_COMPANIONS := [
+    ; >>> PLACEHOLDER: aText - Task Manager > right-click aText > Open file location
+    ; "C:\Program Files\aText\aText.exe",
+    ; >>> PLACEHOLDER: other AHK scripts
+    ; "C:\Users\YOU\Documents\AutoHotkey\MyHotstrings.ahk",
+]
+; true: if a companion is already running when AutoCap starts (e.g. after
+; Reload, or it auto-started on its own), close it and start it again so that
+; its hook is newer than AutoCap's. An .ahk script is closed normally. An .exe
+; is terminated (aText has no documented close command); don't reload AutoCap
+; while you are editing a snippet. false: leave running companions alone.
+global AUTOCAP_RESTART_COMPANIONS := true
 ; -----------------------------------------------------------------------------
 
 
@@ -383,6 +402,10 @@ AutoCap_Main() {
     gIH.OnChar := AutoCap_OnChar
     gIH.OnKeyDown := AutoCap_OnKeyDown
     gIH.OnEnd := AutoCap_OnEnd
+    ; Keep the keyboard hook installed for the script's whole lifetime, also
+    ; while disabled. Otherwise Suspend removes it, and re-enabling would put it
+    ; in front of the companions' hooks again (hook.cpp: ChangeHookState).
+    InstallKeybdHook(true)
 
     ; --- always-on hotkeys ---
     HotIf()
@@ -423,14 +446,66 @@ AutoCap_Main() {
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Disable`tCtrl+Alt+Shift+K", AutoCap_Toggle)
     A_TrayMenu.Add()
+    if AUTOCAP_COMPANIONS.Length
+        A_TrayMenu.Add("Restart companion programs", (*) => AutoCap_StartCompanions(true))
     A_TrayMenu.Add("Edit script", (*) => Edit())
     A_TrayMenu.Add("Reload", (*) => Reload())
     A_TrayMenu.Add("Exit", (*) => ExitApp())
     A_TrayMenu.Default := "1&"
 
-    AutoCap_ApplyEnabled()
+    AutoCap_ApplyEnabled()                 ; keyboard hook is installed from here on
     if (failed != "")
         TrayTip("These keys don't exist on the current keyboard layout: " failed, "AutoCap", "Iconi Mute")
+    AutoCap_StartCompanions(AUTOCAP_RESTART_COMPANIONS)
+}
+
+; ---------------------------------------------------------------- companions
+; Starts each companion after AutoCap's hook exists, so its hook is newer and
+; Windows asks it first. Runs at startup only, never in the typing path.
+AutoCap_StartCompanions(restartRunning) {
+    problems := ""
+    prevHidden := A_DetectHiddenWindows, prevMode := A_TitleMatchMode
+    DetectHiddenWindows(true)
+    SetTitleMatchMode("RegEx")
+    for path in AUTOCAP_COMPANIONS {
+        try {
+            if !FileExist(path) {
+                problems .= "`nnot found: " path
+                continue
+            }
+            SplitPath(path, &name, &dir, &ext)
+            if (ext = "ahk") {
+                if (path = A_ScriptFullPath)
+                    continue
+                ; an AHK script's hidden main window is titled "<full path> - AutoHotkey vX"
+                quoted := "\Q" StrReplace(path, "\E", "\E\\E\Q", true) "\E"   ; literal, even for C:\Users\Eva\...
+                wins := WinGetList("i)^" quoted " - AutoHotkey ahk_class AutoHotkey")
+                if (wins.Length && !restartRunning)
+                    continue
+                for h in wins
+                    try WinClose(h)           ; WM_CLOSE makes a script exit (OnExit reason "Close")
+                for h in wins
+                    if !WinWaitClose("ahk_id " h, , 3)
+                        try ProcessClose(WinGetPID(h))
+            } else if ProcessExist(name) {
+                if !restartRunning
+                    continue
+                Loop 10 {                       ; every instance with this name
+                    if !ProcessExist(name)
+                        break
+                    ProcessClose(name)
+                }
+                ProcessWaitClose(name, 3)
+            }
+            Run('"' path '"', dir)
+        } catch as e {
+            problems .= "`n" path ": " e.Message
+        }
+    }
+    DetectHiddenWindows(prevHidden)
+    SetTitleMatchMode(prevMode)
+    if (problems != "")
+        TrayTip("Could not start companion program(s):" problems, "AutoCap", "Iconx")
 }
 
 ; ---------------------------------------------------------------- enable/disable

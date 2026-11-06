@@ -7,7 +7,7 @@ file, no dependencies: [`AutoCap.ahk`](AutoCap.ahk).
 
 - **Toggle:** Ctrl+Alt+Shift+K, or the tray menu. When disabled, the tray icon switches to AHK's suspended icon.
 - **Autostart:** Win+R → `shell:startup` → create a shortcut to `AutoCap.ahk` there.
-- **Configure:** the top of the script holds the abbreviation list, the closing and opening characters, the excluded programs (with placeholders for your dictation and RIS programs) and the send level.
+- **Configure:** the top of the script holds the abbreviation list, the closing and opening characters, the excluded programs (with placeholders for your dictation and RIS programs), the send level and the companion programs (see [below](#running-alongside-atext-and-other-ahk-scripts)).
 
 ## Behaviour
 
@@ -40,7 +40,16 @@ sudo apt-get install -y --no-install-recommends wine64 xvfb openbox xdotool
 tools/fetch-ahk.sh            # official AHK v2 zip, SHA-256 verified -> tools/.ahk/
 tools/run-tests-wine.sh       # unit tests (core state machine)
 tools/integration/run.sh      # end-to-end: types into Wine Notepad, compare with tools/integration/expected.txt
+tools/integration/companion/run.sh   # companion start order; expect "ende. Y" on all three lines
 ```
+
+The companion test starts AutoCap with a test companion that maps `x` to `Y`.
+If the companion's hook runs first, `ende. x` becomes `ende. Y`. If AutoCap's
+runs first, it becomes `ende. X`. The test checks the result at three points:
+after startup, after disabling and re-enabling AutoCap, and after a second
+AutoCap start, which is what Reload does. Two controls show it can fail:
+`MODE=reverse` starts the companion before AutoCap and gives `X`.
+`MODE=nohook` drops `InstallKeybdHook` and gives `X` after the toggle.
 
 The integration test exercises the real keyboard hook, HotIf, SendEvent, the
 InputHook, Backspace, arrow keys, Ctrl shortcuts, the toggle, Enter variants
@@ -66,12 +75,49 @@ so ä/ö/ü hotkeys are not covered.
 - **Exclusions:** the `ahk_group AutoCapExclude` group.
 - **Single instance:** handled manually, so that a `--test` run never closes the running copy.
 
+## Running alongside aText and other AHK scripts
+
+AutoCap acts only at a sentence start or line start. There it blocks the
+lowercase key and types the capital as a Unicode character at SendLevel 0. At
+a line start it also blocks Space. It ignores level-0 output from other AHK
+scripts, but it sees aText's output: AutoHotkey treats input from non-AHK
+programs as normal typing.
+
+**Start order matters.** Windows passes each keystroke to the most recently
+installed hook first. A tool started after AutoCap therefore sees the original
+key before AutoCap blocks it. AutoCap can start these tools itself:
+
+1. Put their full paths in `AUTOCAP_COMPANIONS` at the top of the script: aText's `.exe` and any `.ahk` scripts.
+2. Remove them from their own autostart: aText's "start at login" option, and their shortcuts in `shell:startup`.
+
+With `AUTOCAP_RESTART_COMPANIONS := true` (the default), AutoCap restarts any
+companion that is already running, for example after Reload. An `.ahk` script
+is closed normally (WM_CLOSE). An `.exe` is terminated, because aText has no
+documented close command, so don't reload AutoCap while you're editing an aText
+snippet. The tray menu also has **Restart companion programs**.
+
+AutoCap keeps its keyboard hook installed while disabled (`InstallKeybdHook`).
+Without that, disabling would remove the hook, and re-enabling would put
+AutoCap in front of the companions again (`hook.cpp`, `ChangeHookState`).
+
+**Avoid in other AHK scripts:**
+- hotkeys or remaps on plain letters (a–z ä ö ü) or on Space (`Space & x::`, `~Space::`)
+- `SendLevel` or `#InputLevel` of 1 or higher for anything that types text. AutoCap would treat that output as your typing.
+- long `SendInput` text. The docs say SendInput falls back to SendEvent whenever another script's hook is installed, so your keystrokes can mix into it. Paste via the clipboard instead.
+- InputHooks that aren't visible (they block text), and `BlockInput`
+
+**aText:**
+- Give abbreviations a non-letter prefix (`;bef`). AutoCap then never blocks any of their keys.
+- Write snippets with correct capitals.
+- Test a snippet such as `test. hallo welt`. If aText types snippets as ordinary key presses, AutoCap could capitalise inside a snippet, out of order. If aText pastes them or types Unicode characters, AutoCap leaves them alone.
+
 ## Status / open items
 
 - [ ] Run `--test` once on the real Windows machine
 - [ ] Manual checklist below
 - [ ] Fill in the dictation/RIS placeholder lines in the exclusion group (top of the script)
-- [ ] **aText risk:** the script blocks the lowercase key and types a capital. If its hook sits before aText's, aText never sees the original key. Whether aText abbreviations still expand at a sentence start is untested. If they don't, try changing which of the two starts first.
+- [ ] Put aText (and any other AHK scripts) in `AUTOCAP_COMPANIONS` and remove them from their own autostart
+- [ ] **aText:** check that a plain-letter abbreviation still expands at a sentence start, and that a snippet like `test. hallo welt` is never scrambled. If it is, consider a guard against keys arriving faster than a human can type.
 - [ ] RIS over Citrix/RDP: capitals are sent as Unicode text (VK_PACKET); check that they arrive
 
 ## Manual checklist (Windows)
@@ -83,6 +129,6 @@ so ä/ö/ü hotkeys are not covered.
 5. Rapid typing: `test. hallo` about 20 times as fast as possible. No `hAllo`, no lost letters.
 6. Holding a key: at a sentence start, hold `a` → `Aaaa…`. At a line start, hold Space → nothing appears, no AHK warning dialog.
 7. AltGr: `test@ x`, `{` `}` `€`. Normal characters, no reset.
-8. aText: an abbreviation at a sentence start and after Enter still expands.
+8. aText: an abbreviation at a sentence start and after Enter still expands. Also after Ctrl+Alt+Shift+K twice, and after Reload.
 9. Windows Terminal / VS Code: nothing is capitalised.
 10. Toggle: Ctrl+Alt+Shift+K and the tray menu (Enable/Disable, Edit script, Reload, Exit); the icon changes when disabled.
