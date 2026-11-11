@@ -71,6 +71,18 @@ global AUTOCAP_COMPANIONS := [
 ; is terminated (aText has no documented close command); don't reload AutoCap
 ; while you are editing a snippet. false: leave running companions alone.
 global AUTOCAP_RESTART_COMPANIONS := true
+
+; aText compatibility. Run tools\aText-probe.ahk once to pick the right values
+; (README, section "aText does not expand after . or Enter").
+; Which hook gets each key first:
+;   "after":  companions start after AutoCap, so they see each key first.
+;             Right if aText IGNORES keys typed by other programs.
+;   "before": AutoCap's hook is placed in front of the companions'.
+;             Right if aText READS keys typed by other programs.
+global AUTOCAP_COMPANION_ORDER := "after"
+; How the capital is typed: "text" = the Unicode character (default),
+; "key" = Shift + the real key, which more programs track like normal typing.
+global AUTOCAP_CAPITAL_SEND := "text"
 ; -----------------------------------------------------------------------------
 
 
@@ -368,6 +380,7 @@ global gWinEventHook := 0
 global gWinEventCb := 0
 global gDeadKeys := Map()
 global gKeyChar := Map()     ; "$a" -> "a"
+global gKeyVK := Map()       ; "$a" -> 0x41
 
 AutoCap_Main()
 return
@@ -428,12 +441,14 @@ AutoCap_Main() {
         try {
             Hotkey("$" k, AutoCap_OnActionKey, "B")
             gKeyChar["$" k] := k
+            gKeyVK["$" k] := vk
             usedVK[vk] := true
         } catch
             failed .= k
     }
     Hotkey("$Space", AutoCap_OnActionKey, "B")
     gKeyChar["$Space"] := " "
+    gKeyVK["$Space"] := 0x20
     HotIf()
 
     ; --- window changes ---
@@ -446,7 +461,9 @@ AutoCap_Main() {
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Disable`tCtrl+Alt+Shift+K", AutoCap_Toggle)
     A_TrayMenu.Add()
-    if AUTOCAP_COMPANIONS.Length
+    if (AUTOCAP_COMPANION_ORDER = "before")
+        A_TrayMenu.Add("Put AutoCap's hook in front", (*) => AutoCap_PutHookInFront(false))
+    else if AUTOCAP_COMPANIONS.Length
         A_TrayMenu.Add("Restart companion programs", (*) => AutoCap_StartCompanions(true))
     A_TrayMenu.Add("Edit script", (*) => Edit())
     A_TrayMenu.Add("Reload", (*) => Reload())
@@ -456,7 +473,39 @@ AutoCap_Main() {
     AutoCap_ApplyEnabled()                 ; keyboard hook is installed from here on
     if (failed != "")
         TrayTip("These keys don't exist on the current keyboard layout: " failed, "AutoCap", "Iconi Mute")
-    AutoCap_StartCompanions(AUTOCAP_RESTART_COMPANIONS)
+    if (AUTOCAP_COMPANION_ORDER = "before")
+        AutoCap_PutHookInFront(true)
+    else
+        AutoCap_StartCompanions(AUTOCAP_RESTART_COMPANIONS)
+}
+
+; "before" order: start companions that aren't running, give them time to
+; install their hooks, then reinstall AutoCap's hook so it is the newest
+; (InstallKeybdHook with Force: "giving it precedence over any hooks previously
+; installed"). Startup / tray menu only, never in the typing path.
+AutoCap_PutHookInFront(startCompanions) {
+    global gBusy
+    if startCompanions {
+        launched := AutoCap_StartCompanions(false)
+        prevHidden := A_DetectHiddenWindows, prevMode := A_TitleMatchMode
+        DetectHiddenWindows(true)
+        SetTitleMatchMode("RegEx")
+        for c in launched {
+            if (c.ext = "ahk")
+                WinWait(c.winTitle, , 10)
+            else
+                ProcessWait(c.name, 10)
+        }
+        DetectHiddenWindows(prevHidden)
+        SetTitleMatchMode(prevMode)
+        if launched.Length
+            Sleep(3000)                     ; let them finish starting and install their hooks
+    }
+    gBusy := true
+    try {
+        InstallKeybdHook(true, true)
+        gCore.Reset()                       ; keys during the reinstall were not seen
+    } finally gBusy := false
 }
 
 ; ---------------------------------------------------------------- companions
@@ -464,6 +513,7 @@ AutoCap_Main() {
 ; Windows asks it first. Runs at startup only, never in the typing path.
 AutoCap_StartCompanions(restartRunning) {
     problems := ""
+    launched := []
     prevHidden := A_DetectHiddenWindows, prevMode := A_TitleMatchMode
     DetectHiddenWindows(true)
     SetTitleMatchMode("RegEx")
@@ -479,7 +529,8 @@ AutoCap_StartCompanions(restartRunning) {
                     continue
                 ; an AHK script's hidden main window is titled "<full path> - AutoHotkey vX"
                 quoted := "\Q" StrReplace(path, "\E", "\E\\E\Q", true) "\E"   ; literal, even for C:\Users\Eva\...
-                wins := WinGetList("i)^" quoted " - AutoHotkey ahk_class AutoHotkey")
+                winTitle := "i)^" quoted " - AutoHotkey ahk_class AutoHotkey"
+                wins := WinGetList(winTitle)
                 if (wins.Length && !restartRunning)
                     continue
                 for h in wins
@@ -498,6 +549,7 @@ AutoCap_StartCompanions(restartRunning) {
                 ProcessWaitClose(name, 3)
             }
             Run('"' path '"', dir)
+            launched.Push({name: name, ext: ext, winTitle: (ext = "ahk") ? winTitle : ""})
         } catch as e {
             problems .= "`n" path ": " e.Message
         }
@@ -506,6 +558,7 @@ AutoCap_StartCompanions(restartRunning) {
     SetTitleMatchMode(prevMode)
     if (problems != "")
         TrayTip("Could not start companion program(s):" problems, "AutoCap", "Iconx")
+    return launched
 }
 
 ; ---------------------------------------------------------------- enable/disable
@@ -568,15 +621,50 @@ AutoCap_OnActionKey(hk) {
         d := gInFlight
         act := (IsObject(d) && d.hk == hk) ? d.act : "pass"   ; decision lost -> type the key unchanged
         gCore.Apply(ch, act)
-        if (act = "upper")
-            SendEvent("{Text}" StrUpper(ch))
-        else if (act = "pass")
-            SendEvent("{Text}" ch)
-        ; "swallow": nothing is typed
+        if (act != "swallow")               ; "swallow": nothing is typed
+            AutoCap_Type(hk, ch, act = "upper")
     } finally {
         gInFlight := 0
         gBusy := false
     }
+}
+
+; Types the replacement for a blocked letter or Space key.
+;   upper=true:  the capital.   upper=false: exactly what the key would have typed
+;   (only when the HotIf decision was lost)
+AutoCap_Type(hk, ch, upper) {
+    capsOn := GetKeyState("CapsLock", "T")
+    if (AUTOCAP_CAPITAL_SEND = "key") {
+        ; the hotkey only fires with no modifier held; with CapsLock on, the bare
+        ; letter key already types the capital
+        AutoCap_SendKeyAtomic(gKeyVK[hk], upper && !capsOn)
+    } else {
+        SendEvent("{Text}" ((upper || capsOn) ? StrUpper(ch) : ch))
+    }
+}
+
+; Shift+key (or the bare key) in ONE SendInput call. Windows inserts the events
+; as a block, so a key you press meanwhile cannot land between Shift-down and
+; the letter (AHK's SendEvent sends them one by one; tested: "EGTippt").
+; AHK's own SendInput is not used because it reinstalls this script's hook.
+; dwExtraInfo carries AutoHotkey's marker for "sent by AHK at SendLevel N"
+; (keyboard_mouse.h: KEY_IGNORE_LEVEL(N) = 0xFFC3D44D - N), so this script's
+; hotkeys and InputHook ignore it exactly like their own Send output.
+AutoCap_SendKeyAtomic(vk, withShift) {
+    static sz := (A_PtrSize = 8) ? 40 : 28          ; sizeof(INPUT)
+    static ki := A_PtrSize                          ; offset of KEYBDINPUT in INPUT
+    static xo := ki + ((A_PtrSize = 8) ? 16 : 12)   ; offset of KEYBDINPUT.dwExtraInfo
+    keys := withShift ? [[0xA0, 0], [vk, 0], [vk, 2], [0xA0, 2]] : [[vk, 0], [vk, 2]]   ; 0xA0 = LShift, 2 = KEYUP
+    buf := Buffer(sz * keys.Length, 0)
+    for i, k in keys {
+        o := (i - 1) * sz
+        NumPut("UInt", 1, buf, o)                                   ; INPUT_KEYBOARD
+        NumPut("UShort", k[1], buf, o + ki)                         ; wVk
+        NumPut("UShort", DllCall("MapVirtualKey", "UInt", k[1], "UInt", 0, "UInt"), buf, o + ki + 2)   ; wScan
+        NumPut("UInt", k[2], buf, o + ki + 4)                       ; dwFlags
+        NumPut("UPtr", 0xFFC3D44D - AUTOCAP_SENDLEVEL, buf, o + xo) ; dwExtraInfo
+    }
+    DllCall("SendInput", "UInt", keys.Length, "Ptr", buf, "Int", sz, "UInt")
 }
 
 ; ---------------------------------------------------------------- observer

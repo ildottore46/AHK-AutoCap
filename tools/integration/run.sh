@@ -13,7 +13,7 @@ cd "$ROOT"
 Xvfb :57 -screen 0 1280x800x24 >/dev/null 2>&1 & XV=$!
 sleep 2; openbox >/dev/null 2>&1 & sleep 1
 $W notepad >/dev/null 2>&1 & sleep 4
-[ -n "${NOAC:-}" ] || { $W "$AHK" /ErrorStdOut AutoCap.ahk > /tmp/autocap.out 2>&1 & sleep 4; }
+[ -n "${NOAC:-}" ] || { $W "$AHK" /ErrorStdOut "${AUTOCAP_SCRIPT:-AutoCap.ahk}" > /tmp/autocap.out 2>&1 & sleep 4; }
 NP=$(xdotool search --name "Notepad" | head -1)
 # Wine without focus: give Notepad focus with ONE real click (also exercises the click reset)
 eval "$(xdotool getwindowgeometry --shell "$NP")"; xdotool mousemove $((X+WIDTH/2)) $((Y+HEIGHT/2)) click 1; sleep 1

@@ -41,6 +41,7 @@ tools/fetch-ahk.sh            # official AHK v2 zip, SHA-256 verified -> tools/.
 tools/run-tests-wine.sh       # unit tests (core state machine)
 tools/integration/run.sh      # end-to-end: types into Wine Notepad, compare with tools/integration/expected.txt
 tools/integration/companion/run.sh   # companion start order; expect "ende. Y" on all three lines
+MODE=before tools/integration/companion/run.sh   # AutoCap's hook in front; expect "X" on all three lines
 ```
 
 The companion test starts AutoCap with a test companion that maps `x` to `Y`.
@@ -111,13 +112,61 @@ AutoCap in front of the companions again (`hook.cpp`, `ChangeHookState`).
 - Write snippets with correct capitals.
 - Test a snippet such as `test. hallo welt`. If aText types snippets as ordinary key presses, AutoCap could capitalise inside a snippet, out of order. If aText pastes them or types Unicode characters, AutoCap leaves them alone.
 
+## aText does not expand after `.` or Enter
+
+This is the conflict described above. At a sentence start AutoCap blocks the
+lowercase first letter and types the capital itself, so aText's abbreviation
+buffer gets either no letter or a wrong one. The right fix depends on one
+aText behaviour that couldn't be tested here: does aText read keys typed by
+other programs? Find out once:
+
+1. Open `tools/aText-probe.ahk` and set `ABBR` to one of your abbreviations.
+2. Disable AutoCap (Ctrl+Alt+Shift+K), run the probe, and click into Notepad.
+3. On separate lines press F1 and F2. Then press F3 and type the rest of the
+   abbreviation yourself, and do the same with F4. Add aText's trigger key if
+   it needs one.
+
+| Result | Meaning | Set in `AutoCap.ahk` |
+|---|---|---|
+| F1 and F2 don't expand | aText ignores typing from other programs. It must see your keys before AutoCap does. | aText in `AUTOCAP_COMPANIONS`, `AUTOCAP_COMPANION_ORDER := "after"` (default). Turn off aText's own "start at login". |
+| F3 expands | aText reads typing from other programs and accepts AutoCap's Unicode capital | `AUTOCAP_COMPANION_ORDER := "before"`, `AUTOCAP_CAPITAL_SEND := "text"` |
+| only F4 expands, not F3 | the same, but aText only follows real key presses | `AUTOCAP_COMPANION_ORDER := "before"`, `AUTOCAP_CAPITAL_SEND := "key"` |
+| F1/F2 expand, F3 and F4 don't | aText reads typing, but `Mfg` doesn't match `mfg` | look for a case option in aText, or give abbreviations a prefix (`;mfg`) |
+
+Then reload AutoCap. Giving abbreviations a non-letter prefix (`;mfg`) works
+in every case, with no settings changed.
+
+How the two new settings work:
+- **`"before"`:** AutoCap starts any companion that isn't running, waits for
+  it, then reinstalls its own hook so that it is the newest. The docs say
+  `InstallKeybdHook(true, true)` gives a hook "precedence over any hooks
+  previously installed". The tray item **Put AutoCap's hook in front** repeats
+  this, for example after aText has restarted itself. Companions that are
+  already running are left alone in this mode.
+- **`"key"`:** AutoCap types the capital as Shift + the real key, in a single
+  Windows `SendInput` call so that no key you press can land between the
+  events. The keystrokes carry AutoHotkey's own "sent by AHK" marker, so
+  AutoCap's hotkeys and InputHook ignore them.
+
+What was tested under Wine:
+- The `"before"` order works: the companion test gives `X` on all three
+  lines, in two runs, and the companions are started once, not restarted.
+- The default `"after"` order and the default `"text"` capitals pass every
+  test.
+- `"key"` mode has **not** been verified. Wine doesn't keep SendInput's
+  "not interspersed" guarantee, and fast typing came out shifted and out of
+  order (`EGTippt`, once `RE sagte`). On Windows this guarantee is documented.
+  Only use `"key"` if the probe calls for it, and if you do, check fast typing
+  on Windows.
+
 ## Status / open items
 
 - [ ] Run `--test` once on the real Windows machine
 - [ ] Manual checklist below
 - [ ] Fill in the dictation/RIS placeholder lines in the exclusion group (top of the script)
 - [ ] Put aText (and any other AHK scripts) in `AUTOCAP_COMPANIONS` and remove them from their own autostart
-- [ ] **aText:** check that a plain-letter abbreviation still expands at a sentence start, and that a snippet like `test. hallo welt` is never scrambled. If it is, consider a guard against keys arriving faster than a human can type.
+- [ ] **aText doesn't expand after `.` / Enter** (reported): run `tools/aText-probe.ahk` and set the two options from the table above
+- [ ] **aText:** check that a snippet like `test. hallo welt` is never scrambled. If it is, consider a guard against keys arriving faster than a human can type.
 - [ ] RIS over Citrix/RDP: capitals are sent as Unicode text (VK_PACKET); check that they arrive
 
 ## Manual checklist (Windows)

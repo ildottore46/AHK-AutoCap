@@ -1,6 +1,7 @@
 #!/bin/bash
 # Checks that AutoCap starts its companions AFTER its own hook (companion hook first),
 # that this survives disable/enable, and that a second AutoCap start restarts them.
+# MODE=before: AutoCap's hook goes in front, so all three lines must read "X".
 # Needs the same packages as ../run.sh.
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"; HERE="$ROOT/tools/integration/companion"
 W=$(command -v wine64 || echo /usr/lib/wine/wine64); AHK="$ROOT/tools/.ahk/AutoHotkey64.exe"
@@ -17,6 +18,7 @@ src,dst,where,mode=sys.argv[1:5]; s=open(src,encoding='utf8').read()
 new='global AUTOCAP_COMPANIONS := [\n    "%s\\companion.ahk",\n    "%s\\Companion2.exe",\n]' % (where,where)
 s=re.sub(r'global AUTOCAP_COMPANIONS := \[.*?\n\]', lambda m: new, s, flags=re.S)
 if mode=='nohook': s=s.replace('    InstallKeybdHook(true)\n','')
+if mode=='before': s=s.replace('global AUTOCAP_COMPANION_ORDER := "after"','global AUTOCAP_COMPANION_ORDER := "before"')
 open(dst,'w',encoding='utf8').write(s)
 PY
 cd "$ROOT"
@@ -28,11 +30,11 @@ if [ "${MODE:-}" = "reverse" ]; then   # control: companion first, then AutoCap 
   $W "$AHK" "$HERE/companion.ahk" & sleep 3
   sed -i 's#^    ".*companion.ahk",$##; s#^    ".*Companion2.exe",$##' "$HERE/AutoCapC.ahk"
 fi
-$W "$AHK" /ErrorStdOut "$HERE/AutoCapC.ahk" > /tmp/autocapc.out 2>&1 & sleep 10
+$W "$AHK" /ErrorStdOut "$HERE/AutoCapC.ahk" > /tmp/autocapc.out 2>&1 & sleep 14
 focus; xdotool type --delay 60 "ende. x"; xdotool key Return
 xdotool key ctrl+alt+shift+k; sleep 0.5; xdotool key ctrl+alt+shift+k; sleep 0.5
 xdotool type --delay 60 "nach toggle. x"; xdotool key Return
-if [ -z "${MODE:-}" ]; then
+if [ -z "${MODE:-}" ] || [ "${MODE:-}" = "before" ]; then
   $W "$AHK" /ErrorStdOut "$HERE/AutoCapC.ahk" > /tmp/autocapc2.out 2>&1 & sleep 12   # second start = reload
   focus; xdotool type --delay 60 "nach neustart. x"
 fi
